@@ -32,6 +32,8 @@ def _daily_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
         "amount": "sum",
     }).dropna()
     weekly = weekly.reset_index()
+    # resample("W") labels bars with Sunday — shift to Friday (last trading day)
+    weekly["date"] = weekly["date"] - pd.Timedelta(days=2)
     return weekly
 
 
@@ -59,7 +61,7 @@ def fetch_weekly_kline(code: str, start_date: str = "20100101",
         try:
             symbol = _code_to_tx_symbol(code)
             df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start_date,
-                                       end_date=end_date)
+                                       end_date=end_date, adjust="qfq")
             break
         except Exception:
             if attempt < 2:

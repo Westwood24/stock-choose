@@ -143,7 +143,7 @@ def detect_all_signals(df: pd.DataFrame, code: str, name: str) -> list[BuySignal
                 break
 
             # 检查 MACD 二次金叉（使用截至 i 的数据）
-            macd_result = _check_macd_second_cross_at(dif, dea, i)
+            macd_result = _check_macd_second_cross_at(dif, dea, i, zone_end)
             if macd_result is None:
                 continue
 
@@ -161,8 +161,8 @@ def detect_all_signals(df: pd.DataFrame, code: str, name: str) -> list[BuySignal
             else:
                 signal_date = str(pd.Timestamp(dates[i]).date())
 
-            # 止损价 = 区间生成后(zone_end+1)到信号触发(i)之间的最低价
-            stop_loss = float(min(low[zone_end + 1 : i + 1]))
+            # 止损价 = 区间下沿（跌破区间则离场）
+            stop_loss = round(range_low, 2)
 
             signals.append(BuySignal(
                 code=code,
@@ -213,9 +213,12 @@ def detect_buy_signal(df: pd.DataFrame, code: str, name: str) -> Optional[BuySig
 # MACD / KDJ 底层检测（在指定 bar 上判定）
 # ============================================================
 
-def _check_macd_second_cross_at(dif: np.ndarray, dea: np.ndarray, idx: int):
+def _check_macd_second_cross_at(dif: np.ndarray, dea: np.ndarray, idx: int,
+                               min_idx: int = 0):
     """在 idx 位置检测 MACD 二次金叉或即将二次金叉。
     使用截至 idx 的数据。
+    Args:
+        min_idx: 最近一次金叉必须在此索引之后（用于区间约束）
     Returns:
         (signal_type, cross_idx) 或 None
     """
@@ -231,17 +234,18 @@ def _check_macd_second_cross_at(dif: np.ndarray, dea: np.ndarray, idx: int):
 
     if len(golden_crosses) >= 2:
         last_gc = golden_crosses[-1]
-        prev_gc = golden_crosses[-2]
-        has_dead_cross = False
-        for j in range(prev_gc + 1, last_gc):
-            if dif_slice[j] < dea_slice[j] and dif_slice[j - 1] >= dea_slice[j - 1]:
-                has_dead_cross = True
-                break
-        if has_dead_cross:
-            return ("second_golden_cross", last_gc)
-        # 无死叉 → 两个金叉之间 DIF 未下穿 DEA，不算真正的二次金叉
-        # 去掉最后一个"伪金叉"，回退到即将二次金叉检测
-        golden_crosses = golden_crosses[:-1]
+        # 最近一次金叉必须在 min_idx 之后
+        if last_gc > min_idx:
+            prev_gc = golden_crosses[-2]
+            has_dead_cross = False
+            for j in range(prev_gc + 1, last_gc):
+                if dif_slice[j] < dea_slice[j] and dif_slice[j - 1] >= dea_slice[j - 1]:
+                    has_dead_cross = True
+                    break
+            if has_dead_cross:
+                return ("second_golden_cross", last_gc)
+            # 无死叉 → 去掉最后一个"伪金叉"
+            golden_crosses = golden_crosses[:-1]
 
     # 只有 0 或 1 次有效金叉 → 检查"即将二次金叉"
     return _check_approaching_second_cross(dif_slice, dea_slice, golden_crosses)

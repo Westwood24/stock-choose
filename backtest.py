@@ -142,10 +142,15 @@ def run_backtest(
         buy_price = float(df.loc[buy_idx, "close"]) * (1 + SLIPPAGE)
         buy_date_str = str(df.loc[buy_idx, "date"].date())
 
-        if USE_STOP_LOSS and sig.stop_loss > 0:
+        # 止损价必须低于买入价，否则跳过（已跌破支撑位）
+        effective_stop = sig.stop_loss
+        if effective_stop >= buy_price:
+            continue
+
+        if USE_STOP_LOSS and effective_stop > 0:
             # --- 止损退出模式 ---
             sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
-                df, buy_idx, sig.stop_loss, max_hold_weeks
+                df, buy_idx, effective_stop, max_hold_weeks
             )
         else:
             # --- 固定持仓周数模式 ---
@@ -251,6 +256,185 @@ def run_backtest(
     exit_summary = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items()))
 
     # 生成摘要
+    summary = (
+        f"======== 回测摘要 ========\n"
+        f"初始资金: {INITIAL_CAPITAL:,.0f}\n"
+        f"最终资金: {final_capital:,.2f}\n"
+        f"总收益率: {total_return:.2f}%\n"
+        f"年化收益: {annual_return:.2f}%\n"
+        f"最大回撤: {max_drawdown:.2f}%\n"
+        f"夏普比率: {sharpe_ratio:.2f}\n"
+        f"交易次数: {total_trades}\n"
+        f"胜率: {win_rate:.2f}%\n"
+        f"退出分布: {exit_summary}\n"
+        f"========================="
+    )
+
+    return BacktestResult(
+        initial_capital=INITIAL_CAPITAL,
+        final_capital=final_capital,
+        total_return=round(total_return, 2),
+        annual_return=round(annual_return, 2),
+        max_drawdown=round(max_drawdown, 2),
+        sharpe_ratio=round(sharpe_ratio, 2),
+        win_rate=round(win_rate, 2),
+        total_trades=total_trades,
+        equity_curve=equity_df,
+        trades=trades,
+        summary=summary,
+    )
+
+
+def run_backtest_with_cache(
+    signals: list,
+    weekly_cache: dict,
+    hold_weeks: Optional[int] = None,
+    max_hold_weeks: Optional[int] = None,
+) -> BacktestResult:
+    """使用缓存的周线数据运行回测，避免重复 API 调用。"""
+    if hold_weeks is None:
+        hold_weeks = HOLD_WEEKS
+    if max_hold_weeks is None:
+        max_hold_weeks = MAX_HOLD_WEEKS
+
+    if not signals:
+        equity = pd.DataFrame({"date": [], "capital": []})
+        return BacktestResult(
+            initial_capital=INITIAL_CAPITAL,
+            final_capital=INITIAL_CAPITAL,
+            total_return=0, annual_return=0,
+            max_drawdown=0, sharpe_ratio=0,
+            win_rate=0, total_trades=0,
+            equity_curve=equity, trades=[],
+            summary="无交易信号，回测未执行。"
+        )
+
+    capital = float(INITIAL_CAPITAL)
+    trades: list[Trade] = []
+    equity_rows: list[dict] = []
+
+    sorted_signals = sorted(signals, key=lambda s: s.date)
+    positions: list[dict] = []
+
+    for sig in sorted_signals:
+        df = weekly_cache.get(sig.code)
+        if df is None or len(df) < 2:
+            continue
+
+        df["date"] = pd.to_datetime(df["date"])
+        buy_mask = df["date"] == pd.to_datetime(sig.date)
+        if not buy_mask.any():
+            buy_mask = df["date"] >= pd.to_datetime(sig.date)
+            if not buy_mask.any():
+                continue
+
+        buy_idx = df[buy_mask].index[0]
+        buy_price = float(df.loc[buy_idx, "close"]) * (1 + SLIPPAGE)
+        buy_date_str = str(df.loc[buy_idx, "date"].date())
+
+        # 止损价必须低于买入价，否则跳过（已跌破支撑位）
+        effective_stop = sig.stop_loss
+        if effective_stop >= buy_price:
+            continue
+
+        if USE_STOP_LOSS and effective_stop > 0:
+            sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
+                df, buy_idx, effective_stop, max_hold_weeks
+            )
+        else:
+            sell_idx = min(buy_idx + hold_weeks, len(df) - 1)
+            sell_price = float(df.loc[sell_idx, "close"]) * (1 - SLIPPAGE)
+            exit_reason = "fixed_hold"
+
+        sell_date = str(df.loc[sell_idx, "date"].date())
+
+        # 清理已结束的仓位
+        positions = [p for p in positions if p["sell_date"] >= buy_date_str]
+        if len(positions) >= MAX_POSITIONS:
+            continue
+
+        per_trade_capital = capital * 0.8 / MAX_POSITIONS
+        shares = int(per_trade_capital / buy_price / 100) * 100
+
+        if shares <= 0:
+            continue
+
+        cost = shares * buy_price
+        commission_buy = cost * COMMISSION_RATE
+        revenue = shares * sell_price
+        commission_sell = revenue * COMMISSION_RATE
+
+        pnl = revenue - cost - commission_buy - commission_sell
+        pnl_pct = pnl / cost * 100 if cost > 0 else 0
+
+        capital += pnl
+
+        trade = Trade(
+            code=sig.code,
+            name=sig.name,
+            buy_date=buy_date_str,
+            sell_date=sell_date,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            shares=shares,
+            pnl=round(pnl, 2),
+            pnl_pct=round(pnl_pct, 2),
+            hold_weeks=sell_idx - buy_idx,
+            exit_reason=exit_reason,
+        )
+        trades.append(trade)
+        positions.append({"code": sig.code, "sell_date": sell_date})
+
+        equity_rows.append({
+            "date": pd.to_datetime(sig.date),
+            "capital": capital,
+        })
+
+    total_trades = len(trades)
+    if total_trades == 0:
+        equity = pd.DataFrame({"date": [], "capital": []})
+        return BacktestResult(
+            initial_capital=INITIAL_CAPITAL,
+            final_capital=INITIAL_CAPITAL,
+            total_return=0, annual_return=0,
+            max_drawdown=0, sharpe_ratio=0,
+            win_rate=0, total_trades=0,
+            equity_curve=equity, trades=[],
+            summary="无交易信号，回测未执行。"
+        )
+
+    final_capital = capital
+    total_return = (final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+
+    wins = sum(1 for t in trades if t.pnl > 0)
+    win_rate = wins / total_trades * 100
+
+    if equity_rows:
+        first_date = equity_rows[0]["date"]
+        last_date = equity_rows[-1]["date"]
+        years = max((last_date - first_date).days / 365, 0.01)
+        annual_return = ((final_capital / INITIAL_CAPITAL) ** (1 / years) - 1) * 100
+    else:
+        annual_return = 0
+
+    equity_df = pd.DataFrame(equity_rows)
+    equity_df = equity_df.sort_values("date").reset_index(drop=True)
+    equity_df["peak"] = equity_df["capital"].cummax()
+    equity_df["drawdown"] = (equity_df["capital"] - equity_df["peak"]) / equity_df["peak"] * 100
+    max_drawdown = float(equity_df["drawdown"].min())
+
+    if total_trades >= 2:
+        returns = np.array([t.pnl_pct for t in trades]) / 100
+        sharpe_ratio = float(np.mean(returns) / (np.std(returns, ddof=1) + 1e-10) * np.sqrt(52 / hold_weeks))
+    else:
+        sharpe_ratio = 0
+
+    exit_counts = {}
+    for t in trades:
+        reason = t.exit_reason or "fixed_hold"
+        exit_counts[reason] = exit_counts.get(reason, 0) + 1
+    exit_summary = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items()))
+
     summary = (
         f"======== 回测摘要 ========\n"
         f"初始资金: {INITIAL_CAPITAL:,.0f}\n"

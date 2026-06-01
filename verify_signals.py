@@ -9,6 +9,7 @@ import pandas as pd
 from config import KDJ_GOLDEN_CROSS_WINDOW
 from data_fetcher import fetch_all_stock_codes, fetch_weekly_kline
 from indicators import calc_all_indicators
+from signal_detector import detect_all_signals
 
 
 # 备选股票列表（API 不稳定时使用）：100 只上市超 10 年的老股票
@@ -49,60 +50,6 @@ FALLBACK_STOCKS = [
     ("000563", "陕国投A"), ("000565", "渝三峡A"), ("000566", "海南海药"),
     ("000567", "海德股份"), ("000568", "泸州老窖"), ("000570", "苏常柴A"),
 ]
-
-
-def find_historical_signals(df: pd.DataFrame) -> list[int]:
-    """在历史数据中高效扫描所有买入信号索引。
-    查找 MACD 二次金叉 + KDJ 4周内金叉 的组合。
-    """
-    n = len(df)
-    dif = df["dif"].values
-    dea = df["dea"].values
-    k = df["k"].values
-    d = df["d"].values
-
-    # 1. 找所有 MACD 金叉位置
-    macd_gc = []
-    for i in range(1, n):
-        if dif[i] > dea[i] and dif[i - 1] <= dea[i - 1]:
-            macd_gc.append(i)
-
-    if len(macd_gc) < 2:
-        return []
-
-    # 2. 找所有死叉位置
-    dead_cross = set()
-    for i in range(1, n):
-        if dif[i] < dea[i] and dif[i - 1] >= dea[i - 1]:
-            dead_cross.add(i)
-
-    # 3. 找所有 KDJ 金叉位置
-    kdj_gc = set()
-    for i in range(1, n):
-        if k[i] > d[i] and k[i - 1] <= d[i - 1]:
-            kdj_gc.add(i)
-
-    # 4. 筛选：二次金叉（与上一次金叉之间有死叉）+ KDJ 确认
-    signals = []
-    for idx in range(1, len(macd_gc)):
-        prev_gc = macd_gc[idx - 1]
-        curr_gc = macd_gc[idx]
-
-        # 检查两次金叉之间是否有死叉
-        has_dc = any(dc in dead_cross for dc in range(prev_gc + 1, curr_gc))
-        if not has_dc:
-            continue
-
-        # 检查 KDJ 在 [curr_gc - KDJ_WINDOW, curr_gc] 范围内是否有金叉
-        kdj_found = False
-        for offset in range(0, KDJ_GOLDEN_CROSS_WINDOW + 1):
-            if (curr_gc - offset) in kdj_gc:
-                kdj_found = True
-                break
-        if kdj_found:
-            signals.append(curr_gc)
-
-    return signals
 
 
 def compute_forward_return(df: pd.DataFrame, signal_idx: int,
@@ -147,10 +94,22 @@ def main():
             continue
 
         df = calc_all_indicators(df)
-        signal_indices = find_historical_signals(df)
+        signals = detect_all_signals(df, code, name)
+
+        if not signals:
+            print(f"[{idx + 1:3d}/{total:3d}] {code} {name} — 无历史信号")
+            continue
+
+        # 将信号日期映射回 K 线索引
+        df["date_str"] = df["date"].apply(lambda x: str(x.date()))
+        signal_indices = []
+        for sig in signals:
+            matches = df[df["date_str"] == sig.date].index
+            if len(matches) > 0:
+                signal_indices.append(matches[0])
 
         if not signal_indices:
-            print(f"[{idx + 1:3d}/{total:3d}] {code} {name} — 无历史信号")
+            print(f"[{idx + 1:3d}/{total:3d}] {code} {name} — 信号日期匹配失败")
             continue
 
         returns = [compute_forward_return(df, si) for si in signal_indices]

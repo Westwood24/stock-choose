@@ -7,6 +7,7 @@ import numpy as np
 from config import (
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     KDJ_N, KDJ_K_SMOOTH, KDJ_D_SMOOTH,
+    FORCE_VOLUME_DIVISOR,
 )
 
 
@@ -63,10 +64,39 @@ def calc_kdj(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_force(df: pd.DataFrame) -> pd.DataFrame:
+    """计算 Force 动量指标。
+    Weight[t] = (High[t] + Low[t] + Close[t]) / 3
+    a[t] = max(High[t] - Low[t], 0.01)
+    Force[t] = (2*Weight[t] - Low[t-1] - High[t]) * Amount[t] / DIVISOR / a[t]
+    Force[0] = 0
+    """
+    high = df["high"].values
+    low = df["low"].values
+    close = df["close"].values
+    amount = df["amount"].values
+
+    n = len(close)
+    weight = (high + low + close) / 3.0
+    a_vals = np.where(high == low, 0.01, high - low)
+
+    force = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        force[i] = ((2.0 * weight[i] - low[i - 1] - high[i])
+                    * amount[i] / FORCE_VOLUME_DIVISOR / a_vals[i])
+
+    df = df.copy()
+    df["weight"] = weight
+    df["a_val"] = a_vals
+    df["force"] = force
+    return df
+
+
 def calc_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """一次性计算 MACD 和 KDJ 指标。"""
+    """一次性计算 MACD、KDJ、Force 指标。"""
     df = calc_macd(df)
     df = calc_kdj(df)
+    df = calc_force(df)
     return df
 
 

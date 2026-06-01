@@ -8,10 +8,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from config import WEEKLY_MIN_BARS
+from config import WEEKLY_MIN_BARS, USE_WHITELIST
 from data_fetcher import fetch_all_stock_codes, fetch_weekly_kline
 from indicators import calc_all_indicators
-from signal_detector import detect_buy_signal, BuySignal, get_signal_summary
+from signal_detector import detect_buy_signal, detect_all_signals, BuySignal, get_signal_summary
+from whitelist_manager import get_whitelist_codes
 
 
 @dataclass
@@ -23,13 +24,18 @@ class ScanResult:
     elapsed_seconds: float
 
 
-def scan_single(code: str, name: str) -> Optional[BuySignal]:
-    """扫描单只股票。"""
+def scan_single(code: str, name: str, historical: bool = False) -> Optional[BuySignal]:
+    """扫描单只股票。
+    Args:
+        historical: True 返回所有历史信号（用于回测），False 仅返回当前信号
+    """
     df = fetch_weekly_kline(code)
     if df is None or len(df) < WEEKLY_MIN_BARS:
         return None
 
     df = calc_all_indicators(df)
+    if historical:
+        return detect_all_signals(df, code, name)
     return detect_buy_signal(df, code, name)
 
 
@@ -37,18 +43,29 @@ def scan_market(
     stock_list: Optional[list[tuple[str, str]]] = None,
     delay: float = 0.1,
     verbose: bool = True,
+    historical: bool = False,
 ) -> ScanResult:
     """全市场扫描。
     Args:
         stock_list: 指定股票列表 [(code, name), ...]，None 表示全市场
         delay: 请求间隔
         verbose: 是否打印进度
+        historical: True 扫描所有历史信号，False 仅扫描当前信号
     Returns:
         ScanResult
     """
     if stock_list is None:
         code_df = fetch_all_stock_codes()
         stock_list = list(zip(code_df["code"], code_df["name"]))
+
+    # 白名单过滤
+    if USE_WHITELIST:
+        whitelist = get_whitelist_codes()
+        if whitelist:
+            before = len(stock_list)
+            stock_list = [(c, n) for c, n in stock_list if c in whitelist]
+            if verbose:
+                print(f"白名单过滤: {before} → {len(stock_list)} 只")
 
     signals: list[BuySignal] = []
     skipped = 0
@@ -62,11 +79,20 @@ def scan_market(
             continue
 
         df = calc_all_indicators(df)
-        sig = detect_buy_signal(df, code, name)
-        if sig is not None:
-            signals.append(sig)
-            if verbose:
-                print(f"[{idx + 1}/{total}] {get_signal_summary(sig)}")
+
+        if historical:
+            sigs = detect_all_signals(df, code, name)
+            if sigs:
+                signals.extend(sigs)
+                if verbose:
+                    for sig in sigs:
+                        print(f"[{idx + 1}/{total}] {get_signal_summary(sig)}")
+        else:
+            sig = detect_buy_signal(df, code, name)
+            if sig is not None:
+                signals.append(sig)
+                if verbose:
+                    print(f"[{idx + 1}/{total}] {get_signal_summary(sig)}")
 
         if verbose and (idx + 1) % 100 == 0:
             print(f"  进度: {idx + 1}/{total}, 已找到 {len(signals)} 个信号")

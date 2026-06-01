@@ -14,6 +14,8 @@ from config import (
     SLIPPAGE,
     HOLD_WEEKS,
     MAX_POSITIONS,
+    USE_STOP_LOSS,
+    MAX_HOLD_WEEKS,
 )
 from data_fetcher import fetch_weekly_kline
 
@@ -31,6 +33,7 @@ class Trade:
     pnl: float          # 盈亏金额
     pnl_pct: float      # 盈亏百分比
     hold_weeks: int
+    exit_reason: str = ""  # "stop_loss" | "max_hold" | "end_of_data" | "fixed_hold"
 
 
 @dataclass
@@ -49,19 +52,53 @@ class BacktestResult:
     summary: str = ""
 
 
+def _find_stop_loss_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
+                          max_hold_weeks: int = MAX_HOLD_WEEKS):
+    """从买入位置逐根 K 线检查止损退出。
+    Returns:
+        (sell_idx, sell_price, exit_reason)
+    """
+    n = len(df)
+    low = df["low"].values
+    close = df["close"].values
+
+    for i in range(buy_idx + 1, n):
+        # 止损触发：最低价触及止损价
+        if low[i] <= stop_loss:
+            return (i, stop_loss, "stop_loss")
+
+        # 时间兜底：超过最大持仓周数
+        if i - buy_idx >= max_hold_weeks:
+            sell_price = float(close[i]) * (1 - SLIPPAGE)
+            return (i, sell_price, "max_hold")
+
+    # 数据结束兜底
+    last_idx = n - 1
+    if last_idx > buy_idx:
+        sell_price = float(close[last_idx]) * (1 - SLIPPAGE)
+        return (last_idx, sell_price, "end_of_data")
+    else:
+        # 极端情况：买入后无后续数据
+        return (buy_idx, float(close[buy_idx]) * (1 - SLIPPAGE), "end_of_data")
+
+
 def run_backtest(
     signals: list,
     hold_weeks: Optional[int] = None,
+    max_hold_weeks: Optional[int] = None,
 ) -> BacktestResult:
     """运行回测。
     Args:
         signals: BuySignal 列表
-        hold_weeks: 持仓周数，None 则使用 config 配置
+        hold_weeks: 固定持仓周数（USE_STOP_LOSS=False 时使用）
+        max_hold_weeks: 最大持仓周数（USE_STOP_LOSS=True 时兜底）
     Returns:
         BacktestResult
     """
     if hold_weeks is None:
         hold_weeks = HOLD_WEEKS
+    if max_hold_weeks is None:
+        max_hold_weeks = MAX_HOLD_WEEKS
 
     if not signals:
         equity = pd.DataFrame({"date": [], "capital": []})
@@ -103,17 +140,26 @@ def run_backtest(
 
         buy_idx = df[buy_mask].index[0]
         buy_price = float(df.loc[buy_idx, "close"]) * (1 + SLIPPAGE)
+        buy_date_str = str(df.loc[buy_idx, "date"].date())
 
-        # 卖出日期（HOLD_WEEKS 周后）
-        sell_idx = min(buy_idx + hold_weeks, len(df) - 1)
-        sell_price = float(df.loc[sell_idx, "close"]) * (1 - SLIPPAGE)
+        if USE_STOP_LOSS and sig.stop_loss > 0:
+            # --- 止损退出模式 ---
+            sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
+                df, buy_idx, sig.stop_loss, max_hold_weeks
+            )
+        else:
+            # --- 固定持仓周数模式 ---
+            sell_idx = min(buy_idx + hold_weeks, len(df) - 1)
+            sell_price = float(df.loc[sell_idx, "close"]) * (1 - SLIPPAGE)
+            exit_reason = "fixed_hold"
+
         sell_date = str(df.loc[sell_idx, "date"].date())
 
-        # 计算可买股数（考虑最大持仓限制）
+        # 清理已结束的仓位（卖出日期早于当前信号日期的视为已平仓）
+        positions = [p for p in positions if p["sell_date"] >= buy_date_str]
         if len(positions) >= MAX_POSITIONS:
             continue
 
-        position_capital = capital / (MAX_POSITIONS - len(positions)) if MAX_POSITIONS - len(positions) > 0 else capital
         # 简化：每笔交易使用总资金的一定比例
         per_trade_capital = capital * 0.8 / MAX_POSITIONS
         shares = int(per_trade_capital / buy_price / 100) * 100  # 整手
@@ -135,7 +181,7 @@ def run_backtest(
         trade = Trade(
             code=sig.code,
             name=sig.name,
-            buy_date=sig.date,
+            buy_date=buy_date_str,
             sell_date=sell_date,
             buy_price=buy_price,
             sell_price=sell_price,
@@ -143,8 +189,10 @@ def run_backtest(
             pnl=round(pnl, 2),
             pnl_pct=round(pnl_pct, 2),
             hold_weeks=sell_idx - buy_idx,
+            exit_reason=exit_reason,
         )
         trades.append(trade)
+        positions.append({"code": sig.code, "sell_date": sell_date})
 
         # 记录权益（简化：每笔交易记录一个点）
         equity_rows.append({
@@ -195,6 +243,13 @@ def run_backtest(
     else:
         sharpe_ratio = 0
 
+    # 退出原因统计
+    exit_counts = {}
+    for t in trades:
+        reason = t.exit_reason or "fixed_hold"
+        exit_counts[reason] = exit_counts.get(reason, 0) + 1
+    exit_summary = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items()))
+
     # 生成摘要
     summary = (
         f"======== 回测摘要 ========\n"
@@ -206,6 +261,7 @@ def run_backtest(
         f"夏普比率: {sharpe_ratio:.2f}\n"
         f"交易次数: {total_trades}\n"
         f"胜率: {win_rate:.2f}%\n"
+        f"退出分布: {exit_summary}\n"
         f"========================="
     )
 

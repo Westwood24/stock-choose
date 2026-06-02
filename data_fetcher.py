@@ -91,6 +91,46 @@ def fetch_weekly_kline(code: str, start_date: str = "20100101",
     return df
 
 
+def fetch_daily_kline(code: str, start_date: str = "20100101",
+                       end_date: str = "20500101") -> Optional[pd.DataFrame]:
+    """获取单只股票的日线 K 线数据（腾讯源，不复权转周线）。
+    与 fetch_weekly_kline 的区别：跳过 _daily_to_weekly，直接返回日线。
+    Returns:
+        DataFrame with columns: date, open, high, low, close, amount
+    """
+    from config import DAILY_MIN_BARS
+
+    df = None
+    for attempt in range(3):
+        try:
+            symbol = _code_to_tx_symbol(code)
+            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start_date,
+                                       end_date=end_date, adjust="qfq")
+            break
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+    if df is None or df.empty:
+        return None
+
+    df = df.rename(columns={
+        "成交额": "amount",
+    })
+
+    for col in ["open", "high", "low", "close", "amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # 保持日线，不做周线 resample
+    if "amount" not in df.columns:
+        df["amount"] = 0
+
+    if len(df) < DAILY_MIN_BARS:
+        return None
+
+    return df
+
+
 def fetch_all_weekly(stock_codes: list[str], delay: float = 0.1,
                      progress_callback=None) -> dict[str, pd.DataFrame]:
     """批量获取多只股票的周线数据。"""

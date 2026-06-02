@@ -15,6 +15,8 @@ from config import (
     HOLD_WEEKS,
     MAX_POSITIONS,
     USE_STOP_LOSS,
+    USE_TAKE_PROFIT,
+    TP_LEVEL_MULTIPLIER,
     MAX_HOLD_WEEKS,
 )
 from data_fetcher import fetch_weekly_kline
@@ -82,16 +84,81 @@ def _find_stop_loss_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
         return (buy_idx, float(close[buy_idx]) * (1 - SLIPPAGE), "end_of_data")
 
 
+def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
+                         range_high: float, max_hold_weeks: int = MAX_HOLD_WEEKS):
+    """止损 + 移动止盈 + 时间兜底的组合退出逻辑。
+
+    止盈逻辑（基于能级突破的移动止盈）：
+        - R = (range_high - stop_loss) * TP_LEVEL_MULTIPLIER
+        - 能级 N = range_high + N*R  (N = 1, 2, 3, ...)
+        - 收盘价突破某能级后，该能级价格成为移动止盈价
+        - 若收盘价回落跌破当前止盈价，触发止盈出场
+        - 突破更高能级时，止盈价也随之抬升（跟踪止盈）
+
+    Returns:
+        (sell_idx, sell_price, exit_reason)
+    """
+    n = len(df)
+    low = df["low"].values
+    close = df["close"].values
+
+    R = (range_high - stop_loss) * TP_LEVEL_MULTIPLIER
+    if R <= 0:
+        # R 非正时退化为纯止损模式
+        return _find_stop_loss_exit(df, buy_idx, stop_loss, max_hold_weeks)
+
+    current_tp_stop = None   # 当前移动止盈价（已突破的最高能级价格）
+    highest_level = 0        # 已突破的最高能级编号
+
+    for i in range(buy_idx + 1, n):
+        # --- 1. 止损检查（优先级最高） ---
+        if low[i] <= stop_loss:
+            return (i, stop_loss, "stop_loss")
+
+        # --- 2. 检查是否突破新的能级 ---
+        # 从当前最高能级+1 开始逐级检查
+        N = highest_level + 1
+        while True:
+            level_price = range_high + N * R
+            if close[i] >= level_price:
+                highest_level = N
+                current_tp_stop = level_price
+                N += 1
+            else:
+                break
+
+        # --- 3. 移动止盈检查 ---
+        if current_tp_stop is not None and close[i] < current_tp_stop:
+            # 收盘价回落跌破当前止盈价，触发止盈
+            sell_price = float(close[i]) * (1 - SLIPPAGE)
+            return (i, sell_price, "take_profit")
+
+        # --- 4. 时间兜底 ---
+        if i - buy_idx >= max_hold_weeks:
+            sell_price = float(close[i]) * (1 - SLIPPAGE)
+            return (i, sell_price, "max_hold")
+
+    # 数据结束兜底
+    last_idx = n - 1
+    if last_idx > buy_idx:
+        sell_price = float(close[last_idx]) * (1 - SLIPPAGE)
+        return (last_idx, sell_price, "end_of_data")
+    else:
+        return (buy_idx, float(close[buy_idx]) * (1 - SLIPPAGE), "end_of_data")
+
+
 def run_backtest(
     signals: list,
     hold_weeks: Optional[int] = None,
     max_hold_weeks: Optional[int] = None,
+    periods_per_year: int = 52,
 ) -> BacktestResult:
     """运行回测。
     Args:
         signals: BuySignal 列表
         hold_weeks: 固定持仓周数（USE_STOP_LOSS=False 时使用）
         max_hold_weeks: 最大持仓周数（USE_STOP_LOSS=True 时兜底）
+        periods_per_year: 年化周期数（周线=52，日线=252）
     Returns:
         BacktestResult
     """
@@ -148,10 +215,15 @@ def run_backtest(
             continue
 
         if USE_STOP_LOSS and effective_stop > 0:
-            # --- 止损退出模式 ---
-            sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
-                df, buy_idx, effective_stop, max_hold_weeks
-            )
+            # --- 止损退出模式（可选止盈联动） ---
+            if USE_TAKE_PROFIT:
+                sell_idx, sell_price, exit_reason = _find_combined_exit(
+                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks
+                )
+            else:
+                sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
+                    df, buy_idx, effective_stop, max_hold_weeks
+                )
         else:
             # --- 固定持仓周数模式 ---
             sell_idx = min(buy_idx + hold_weeks, len(df) - 1)
@@ -244,7 +316,7 @@ def run_backtest(
     # 夏普比率（简化：基于每笔交易盈亏）
     if total_trades >= 2:
         returns = np.array([t.pnl_pct for t in trades]) / 100
-        sharpe_ratio = float(np.mean(returns) / (np.std(returns, ddof=1) + 1e-10) * np.sqrt(52 / hold_weeks))
+        sharpe_ratio = float(np.mean(returns) / (np.std(returns, ddof=1) + 1e-10) * np.sqrt(periods_per_year / hold_weeks))
     else:
         sharpe_ratio = 0
 
@@ -290,8 +362,12 @@ def run_backtest_with_cache(
     weekly_cache: dict,
     hold_weeks: Optional[int] = None,
     max_hold_weeks: Optional[int] = None,
+    periods_per_year: int = 52,
 ) -> BacktestResult:
-    """使用缓存的周线数据运行回测，避免重复 API 调用。"""
+    """使用缓存的周线数据运行回测，避免重复 API 调用。
+    Args:
+        periods_per_year: 年化周期数（周线=52，日线=252）
+    """
     if hold_weeks is None:
         hold_weeks = HOLD_WEEKS
     if max_hold_weeks is None:
@@ -338,10 +414,17 @@ def run_backtest_with_cache(
             continue
 
         if USE_STOP_LOSS and effective_stop > 0:
-            sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
-                df, buy_idx, effective_stop, max_hold_weeks
-            )
+            # --- 止损退出模式（可选止盈联动） ---
+            if USE_TAKE_PROFIT:
+                sell_idx, sell_price, exit_reason = _find_combined_exit(
+                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks
+                )
+            else:
+                sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
+                    df, buy_idx, effective_stop, max_hold_weeks
+                )
         else:
+            # --- 固定持仓周数模式 ---
             sell_idx = min(buy_idx + hold_weeks, len(df) - 1)
             sell_price = float(df.loc[sell_idx, "close"]) * (1 - SLIPPAGE)
             exit_reason = "fixed_hold"
@@ -425,7 +508,7 @@ def run_backtest_with_cache(
 
     if total_trades >= 2:
         returns = np.array([t.pnl_pct for t in trades]) / 100
-        sharpe_ratio = float(np.mean(returns) / (np.std(returns, ddof=1) + 1e-10) * np.sqrt(52 / hold_weeks))
+        sharpe_ratio = float(np.mean(returns) / (np.std(returns, ddof=1) + 1e-10) * np.sqrt(periods_per_year / hold_weeks))
     else:
         sharpe_ratio = 0
 

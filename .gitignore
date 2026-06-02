@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.csv
+*.pkl
 .DS_Store
 .vscode/
 .idea/

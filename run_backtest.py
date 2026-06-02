@@ -6,7 +6,6 @@ import pandas as pd
 import numpy as np
 import time
 import random
-import sys
 import pickle
 import threading
 from data_fetcher import fetch_all_stock_codes, fetch_weekly_kline

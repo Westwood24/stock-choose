@@ -16,8 +16,7 @@ from config import (
 from stock_scanner import scan_market, scan_single, signals_to_dataframe, get_signal_summary
 from backtest import run_backtest
 from whitelist_manager import (
-    load_whitelist, update_whitelist_auto, get_whitelist_codes,
-    add_to_whitelist, remove_from_whitelist,
+    load_whitelist, update_whitelist_auto, add_to_whitelist, remove_from_whitelist,
 )
 
 
@@ -89,7 +88,7 @@ def cmd_backtest(args):
 def cmd_whitelist_update(args):
     """自动更新白名单（筛选每股经营现金流 > 0 的股票）。"""
     min_ocf = args.min_ocf or WHITELIST_MIN_OCF
-    print(f"开始自动更新白名单...")
+    print("开始自动更新白名单...")
     print(f"条件: 每股经营现金流 > {min_ocf}, 请求间隔={args.delay}s")
     print("-" * 60)
 
@@ -126,7 +125,7 @@ def cmd_whitelist_show(args):
         if not auto.empty:
             print(f"  平均每股经营现金流: {auto['ocf_per_share'].mean():.2f}")
 
-    print(f"\n前 20 只:")
+    print("\n前 20 只:")
     for _, row in df.head(20).iterrows():
         print(f"  {row['code']} {row['name']}  "
               f"OCF={row.get('ocf_per_share', '-')}  "
@@ -167,7 +166,7 @@ def main():
     p_wlr = sub.add_parser("whitelist-remove", help="从白名单移除股票")
     p_wlr.add_argument("code", type=str, help="股票代码")
 
-    p_wls = sub.add_parser("whitelist-show", help="查看白名单")
+    _p_wls = sub.add_parser("whitelist-show", help="查看白名单")
 
     args = parser.parse_args()
 

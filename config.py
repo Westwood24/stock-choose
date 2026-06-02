@@ -13,13 +13,13 @@ MACD_SIGNAL = 9       # 信号线周期（DEA）
 # KDJ 指标参数
 # ============================================================
 KDJ_N = 9             # RSV 计算周期
-KDJ_K_SMOOTH = 3      # K 值平滑因子（EMA 方式）= 2 / (K_SMOOTH + 1)
-KDJ_D_SMOOTH = 3      # D 值平滑因子（EMA 方式）= 2 / (D_SMOOTH + 1)
+KDJ_K_SMOOTH = 3      # K 值平滑周期（标准 SMA 方式，权重 = 1/N，与通达信一致）
+KDJ_D_SMOOTH = 3      # D 值平滑周期（标准 SMA 方式，权重 = 1/N，与通达信一致）
 
 # ============================================================
 # 选股信号参数
 # ============================================================
-KDJ_GOLDEN_CROSS_WINDOW = 4       # KDJ 金叉在 N 个周期内有效
+KDJ_GOLDEN_CROSS_WINDOW = 1       # KDJ 金叉在 N 个周期内有效（1=最严格，实测最优）
 MACD_SECOND_CROSS_LOOKBACK = 60   # 寻找二次金叉的最大回看周数
 MACD_APPROACHING_THRESHOLD = 0.3  # "即将金叉"判定：DIF与DEA距离缩小的比例阈值
 

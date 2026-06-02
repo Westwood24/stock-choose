@@ -2,7 +2,7 @@
 选股信号检测模块 — Force 盘整区间 + MACD 周线二次金叉 + KDJ 金叉确认。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -10,7 +10,6 @@ import pandas as pd
 
 from config import (
     KDJ_GOLDEN_CROSS_WINDOW,
-    MACD_SECOND_CROSS_LOOKBACK,
     MACD_APPROACHING_THRESHOLD,
     FORCE_DELTA_CONSECUTIVE,
     RANGE_BREAK_TOLERANCE,
@@ -155,11 +154,8 @@ def detect_all_signals(df: pd.DataFrame, code: str, name: str) -> list[BuySignal
             if kdj_bars_ago is None:
                 continue
 
-            # 构造信号
-            if signal_type == "second_golden_cross":
-                signal_date = str(pd.Timestamp(dates[cross_idx]).date())
-            else:
-                signal_date = str(pd.Timestamp(dates[i]).date())
+            # 构造信号 — 信号日期取所有条件（MACD+KDJ）都满足的当前 bar
+            signal_date = str(pd.Timestamp(dates[i]).date())
 
             # 止损价 = 区间下沿（跌破区间则离场）
             stop_loss = round(range_low, 2)
@@ -254,8 +250,6 @@ def _check_macd_second_cross_at(dif: np.ndarray, dea: np.ndarray, idx: int,
 def _check_approaching_second_cross(dif: np.ndarray, dea: np.ndarray,
                                      golden_crosses: list):
     """检测是否即将形成二次金叉。"""
-    n = len(dif)
-
     if not golden_crosses:
         return None
 

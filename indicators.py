@@ -32,7 +32,8 @@ def calc_macd(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calc_kdj(df: pd.DataFrame) -> pd.DataFrame:
-    """计算周线 KDJ 指标（EMA 平滑方式）。
+    """计算 KDJ 指标（标准 SMA 平滑方式，权重 = 1/N）。
+    与通达信/同花顺等主流平台的 KDJ 公式一致。
     Returns:
         df: 新增 k, d, j 列
     """
@@ -45,15 +46,16 @@ def calc_kdj(df: pd.DataFrame) -> pd.DataFrame:
     k = np.full(n, 50.0)
     d = np.full(n, 50.0)
 
-    mult_k = 2.0 / (KDJ_K_SMOOTH + 1)
-    mult_d = 2.0 / (KDJ_D_SMOOTH + 1)
+    # 标准 KDJ 平滑：K = (1/N)*RSV + ((N-1)/N)*K_prev，等价于通达信 SMA(RSV,N,1)
+    weight_k = 1.0 / KDJ_K_SMOOTH
+    weight_d = 1.0 / KDJ_D_SMOOTH
 
     for i in range(KDJ_N, n):
         high_n = high[i - KDJ_N + 1 : i + 1].max()
         low_n = low[i - KDJ_N + 1 : i + 1].min()
         rsv = (close[i] - low_n) / (high_n - low_n) * 100 if high_n != low_n else 50.0
-        k[i] = mult_k * rsv + (1 - mult_k) * k[i - 1]
-        d[i] = mult_d * k[i] + (1 - mult_d) * d[i - 1]
+        k[i] = weight_k * rsv + (1 - weight_k) * k[i - 1]
+        d[i] = weight_d * k[i] + (1 - weight_d) * d[i - 1]
 
     j = 3 * k - 2 * d
 

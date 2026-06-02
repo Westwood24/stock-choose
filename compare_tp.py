@@ -3,7 +3,6 @@
 复用已有 backtest_cache.pkl，仅切换 USE_TAKE_PROFIT 跑两次回测。
 """
 import pickle
-import sys
 import importlib
 import config
 from backtest import run_backtest_with_cache

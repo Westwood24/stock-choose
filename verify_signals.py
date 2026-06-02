@@ -6,7 +6,6 @@ import time
 import numpy as np
 import pandas as pd
 
-from config import KDJ_GOLDEN_CROSS_WINDOW
 from data_fetcher import fetch_all_stock_codes, fetch_weekly_kline
 from indicators import calc_all_indicators
 from signal_detector import detect_all_signals
@@ -145,7 +144,7 @@ def main():
     print(f"最大跌幅:              {np.min(all_returns):+.2%}")
     print(f"上涨概率:              {np.mean(all_returns > 0):.1%}")
 
-    print(f"\n分位统计:")
+    print("\n分位统计:")
     for p in [10, 25, 50, 75, 90]:
         val = np.percentile(all_returns, p)
         print(f"  P{p}: {val:+.2%}")
@@ -153,7 +152,7 @@ def main():
     # 保存明细
     df_stats = pd.DataFrame(stats_per_stock)
     df_stats.to_csv("verify_result.csv", index=False, encoding="utf-8-sig")
-    print(f"\n明细已保存至 verify_result.csv")
+    print("\n明细已保存至 verify_result.csv")
 
 
 if __name__ == "__main__":

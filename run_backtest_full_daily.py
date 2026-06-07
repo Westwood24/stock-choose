@@ -25,6 +25,7 @@ from config import (
     UPTREND_CONSECUTIVE, VOLUME_MA_PERIOD,
     RANGE_BREAK_TOLERANCE,
     INITIAL_CAPITAL, MAX_POSITIONS, COMMISSION_RATE, SLIPPAGE,
+    USE_MA_TREND_FILTER, MA_TREND_FAST, MA_TREND_SLOW,
 )
 
 random.seed(42)
@@ -80,7 +81,9 @@ print(f"  区间触发连续={UPTREND_CONSECUTIVE}期上升状态 | "
       f"突破容差={RANGE_BREAK_TOLERANCE}")
 print(f"  止损=启用 | 止盈=启用 | 能级倍率 M={TP_LEVEL_MULTIPLIER} | "
       f"最大持仓={MAX_HOLD_DAYS}天兜底")
+ma_status = f"启用 (MA{MA_TREND_FAST}>MA{MA_TREND_SLOW})" if USE_MA_TREND_FILTER else "关闭"
 print(f"  初始资金={INITIAL_CAPITAL:,} | 最大仓位={MAX_POSITIONS}")
+print(f"  MA趋势过滤={ma_status}")
 print(f"  全量股票: {len(stock_list)} 只 | 年化交易日={TRADING_DAYS_PER_YEAR}")
 print("=" * 60)
 
@@ -98,10 +101,39 @@ elapsed = time.time() - t0
 print(f"数据读取耗时: {elapsed:.1f}s")
 
 # ============================================================
+# MA 趋势过滤
+# ============================================================
+if USE_MA_TREND_FILTER:
+    print()
+    print(f"第二步：周线 MA{MA_TREND_FAST}>MA{MA_TREND_SLOW} 趋势过滤...")
+    from local_data_fetcher import fetch_all_weekly_from_local
+    weekly_data = fetch_all_weekly_from_local(codes_only, verbose=False)
+    approved = {}
+    bull = bear = no_data = 0
+    for code, _ in stock_list:
+        wdf = weekly_data.get(code)
+        if wdf is None or len(wdf) < MA_TREND_SLOW:
+            no_data += 1
+            continue
+        ma_fast = np.mean(wdf["close"].values[-MA_TREND_FAST:])
+        ma_slow = np.mean(wdf["close"].values[-MA_TREND_SLOW:])
+        if ma_fast > ma_slow:
+            approved[code] = daily_cache.get(code)
+            bull += 1
+        else:
+            bear += 1
+    daily_cache = {k: v for k, v in approved.items() if v is not None}
+    print(f"  多头: {bull}, 空头: {bear}, 数据不足: {no_data}")
+    print(f"  过滤后: {len(daily_cache)} 只 (淘汰 {bear} 只)")
+    step_label = "三"
+else:
+    step_label = "二"
+
+# ============================================================
 # 信号检测
 # ============================================================
 print()
-print("第二步：计算指标 & 检测信号（日线）...")
+print(f"第{step_label}步：计算指标 & 检测信号（日线）...")
 all_signals = []
 valid = 0
 skipped = 0

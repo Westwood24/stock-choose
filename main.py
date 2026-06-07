@@ -9,7 +9,7 @@ from config import (
     KDJ_N, KDJ_K_SMOOTH, KDJ_D_SMOOTH,
     KDJ_GOLDEN_CROSS_WINDOW, HOLD_WEEKS, MAX_POSITIONS,
     INITIAL_CAPITAL, COMMISSION_RATE, SLIPPAGE,
-    FORCE_VOLUME_DIVISOR, FORCE_DELTA_CONSECUTIVE,
+    UPTREND_CONSECUTIVE, VOLUME_MA_PERIOD,
     RANGE_BREAK_TOLERANCE, USE_STOP_LOSS, MAX_HOLD_WEEKS,
     USE_WHITELIST, WHITELIST_MIN_OCF,
 )
@@ -26,8 +26,8 @@ def cmd_scan(args):
     print(f"参数: MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}) | "
           f"KDJ({KDJ_N},{KDJ_K_SMOOTH},{KDJ_D_SMOOTH}) | "
           f"KDJ窗口={KDJ_GOLDEN_CROSS_WINDOW}")
-    print(f"      Force除数={FORCE_VOLUME_DIVISOR} | "
-          f"区间触发连续={FORCE_DELTA_CONSECUTIVE}期 | "
+    print(f"      区间触发连续={UPTREND_CONSECUTIVE}期上升状态 | "
+          f"成交量MA={VOLUME_MA_PERIOD} | "
           f"突破容差={RANGE_BREAK_TOLERANCE}")
     print("-" * 60)
 
@@ -59,8 +59,9 @@ def cmd_backtest(args):
     print(f"退出模式: {exit_mode} | 最大持仓{MAX_POSITIONS}只 | "
           f"初始资金{INITIAL_CAPITAL:,} | 手续费{COMMISSION_RATE:.4f} | 滑点{SLIPPAGE:.3f}")
     if USE_STOP_LOSS:
-        print(f"最大持仓{MAX_HOLD_WEEKS}周(兜底) | Force除数={FORCE_VOLUME_DIVISOR} | "
-              f"区间触发={FORCE_DELTA_CONSECUTIVE}期 | 突破容差={RANGE_BREAK_TOLERANCE}")
+        print(f"最大持仓{MAX_HOLD_WEEKS}周(兜底) | "
+              f"区间触发={UPTREND_CONSECUTIVE}期上升 | 成交量MA={VOLUME_MA_PERIOD} | "
+              f"突破容差={RANGE_BREAK_TOLERANCE}")
     print("-" * 60)
 
     # 先扫描历史信号

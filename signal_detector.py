@@ -1,5 +1,5 @@
 """
-选股信号检测模块 — Force 盘整区间 + MACD 周线二次金叉 + KDJ 金叉确认。
+选股信号检测模块 — 价格行为盘整区间 + MACD 周线二次金叉 + KDJ 金叉确认。
 """
 
 from dataclasses import dataclass
@@ -11,8 +11,12 @@ import pandas as pd
 from config import (
     KDJ_GOLDEN_CROSS_WINDOW,
     MACD_APPROACHING_THRESHOLD,
-    FORCE_DELTA_CONSECUTIVE,
+    UPTREND_CONSECUTIVE,
+    VOLUME_MA_PERIOD,
     RANGE_BREAK_TOLERANCE,
+    ZONE_MIN_ATR_MULT,
+    ZONE_SUPPORT_BARS,
+    STOP_LOSS_ATR_BUFFER,
 )
 
 
@@ -38,26 +42,51 @@ class BuySignal:
 # ============================================================
 
 def detect_all_zones(df: pd.DataFrame) -> list[dict]:
-    """扫描 Force 指标，检测所有盘整区间。
+    """基于价格行为检测盘整区间。
+
+    上升状态定义（三个条件同时满足）：
+        - 最高价高于前一根最高价
+        - 最低价高于前一根最低价
+        - 成交量大于前 VOLUME_MA_PERIOD 根 K 线均值
+
+    连续 UPTREND_CONSECUTIVE 个周期为上升状态时，开始记录上涨区间：
+        - 区间起始 = 第一个上升状态截面的上一个截面最低价
+        - 区间终点 = 第一个"最高价 < 前一根最高价"截面的上一个截面最高价
+
     Returns:
         list[dict] with keys: range_low, range_high, zone_end_idx, closed
     """
-    force = df["force"].values
     high = df["high"].values
     low = df["low"].values
-    n = len(force)
+    amount = df["amount"].values
+    n = len(high)
 
-    if n < FORCE_DELTA_CONSECUTIVE + 1:
+    if n < VOLUME_MA_PERIOD + UPTREND_CONSECUTIVE + 1:
         return []
 
+    # 计算成交量 MA(N)（滚动窗口，包含当前 bar）
+    vol_ma = pd.Series(amount).rolling(
+        window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD
+    ).mean().values
+
+    # 标记上升状态
+    is_uptrend = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if not np.isnan(vol_ma[i]):
+            is_uptrend[i] = (
+                high[i] > high[i - 1]
+                and low[i] > low[i - 1]
+                and amount[i] > vol_ma[i]
+            )
+
     zones = []
-    i = FORCE_DELTA_CONSECUTIVE
+    i = UPTREND_CONSECUTIVE  # 从第 N 根 bar 开始检查（需要 N 根确认）
 
     while i < n:
-        # 检查连续 FORCE_DELTA_CONSECUTIVE 期 delta > 0
+        # 检查最近 UPTREND_CONSECUTIVE 个周期是否连续为上升状态
         triggered = True
-        for j in range(i - FORCE_DELTA_CONSECUTIVE + 1, i + 1):
-            if force[j] - force[j - 1] <= 0:
+        for j in range(i - UPTREND_CONSECUTIVE + 1, i + 1):
+            if not is_uptrend[j]:
                 triggered = False
                 break
 
@@ -65,32 +94,43 @@ def detect_all_zones(df: pd.DataFrame) -> list[dict]:
             i += 1
             continue
 
-        trigger_idx = i
-
-        # 往回找第一个 Force > 0 的 K 线
-        back_idx = trigger_idx
-        while back_idx >= 0 and force[back_idx] <= 0:
-            back_idx -= 1
-
-        if back_idx < 0:
+        # 第一个上升状态的位置
+        first_uptrend_idx = i - UPTREND_CONSECUTIVE + 1
+        if first_uptrend_idx < 1:
             i += 1
             continue
 
-        range_low = low[max(back_idx - 1, 0)]
+        # 区间起始 = 第一个上升状态截面的上一个截面最低价
+        # A2: 多 bar 支撑 — 取 uptrend 前 N 根 bar 的最低点
+        if ZONE_SUPPORT_BARS > 1:
+            start = max(0, first_uptrend_idx - ZONE_SUPPORT_BARS)
+            range_low = float(np.min(low[start:first_uptrend_idx]))
+        else:
+            range_low = low[first_uptrend_idx - 1]
 
-        # 往后找第一个 Force < 0 的 K 线
-        fwd_idx = trigger_idx + 1
-        while fwd_idx < n and force[fwd_idx] >= 0:
+        # 往后找第一个"最高价 < 前一根最高价"的位置（趋势破坏点）
+        # 区间终点 = 该截面的上一个截面最高价
+        fwd_idx = i + 1
+        while fwd_idx < n and high[fwd_idx] >= high[fwd_idx - 1]:
             fwd_idx += 1
 
         if fwd_idx < n:
+            # 找到了趋势破坏点
             range_high = high[fwd_idx - 1]
             zone_end_idx = fwd_idx - 1
             closed = True
         else:
+            # 数据结束时未找到趋势破坏，区间延伸到末尾
             range_high = high[-1]
             zone_end_idx = n - 1
             closed = False
+
+        # A1: ATR 区间宽度过滤 — 跳过过窄的区间
+        if ZONE_MIN_ATR_MULT > 0 and "atr" in df.columns:
+            atr_val = df["atr"].values[zone_end_idx]
+            if not np.isnan(atr_val) and (range_high - range_low) < ZONE_MIN_ATR_MULT * atr_val:
+                i = max(fwd_idx, i + 1)
+                continue
 
         if range_high > range_low:
             zones.append({
@@ -100,7 +140,8 @@ def detect_all_zones(df: pd.DataFrame) -> list[dict]:
                 "closed": closed,
             })
 
-        i = max(fwd_idx, trigger_idx + 1)
+        # 跳过已处理区域，继续扫描后续
+        i = max(fwd_idx, i + 1)
 
     return zones
 
@@ -157,8 +198,24 @@ def detect_all_signals(df: pd.DataFrame, code: str, name: str) -> list[BuySignal
             # 构造信号 — 信号日期取所有条件（MACD+KDJ）都满足的当前 bar
             signal_date = str(pd.Timestamp(dates[i]).date())
 
-            # 止损价 = 区间下沿（跌破区间则离场）
-            stop_loss = round(range_low, 2)
+            # 止损价 = 区间生成后后续的最低价（≥ 区间下限）
+            # 从 zone_end_idx+1 到当前信号 bar i 之间取最低价
+            post_zone_lows = low[zone_end + 1 : i + 1]
+            if len(post_zone_lows) > 0:
+                stop_loss = float(np.min(post_zone_lows))
+                # 确保止损价不低于区间下限
+                stop_loss = max(stop_loss, range_low)
+            else:
+                stop_loss = range_low
+
+            # C1: ATR 止损缓冲 — 给止损一点呼吸空间，减少震出
+            if STOP_LOSS_ATR_BUFFER > 0 and "atr" in df.columns:
+                atr_val = df["atr"].values[i]
+                if not np.isnan(atr_val):
+                    stop_loss = stop_loss - STOP_LOSS_ATR_BUFFER * atr_val
+                    stop_loss = max(stop_loss, 0.01)  # 不能为负
+
+            stop_loss = round(stop_loss, 2)
 
             signals.append(BuySignal(
                 code=code,

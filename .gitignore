@@ -1,8 +1,17 @@
 __pycache__/
 *.pyc
 *.pyo
-*.csv
-*.pkl
+# Cache 文件（体积大，可重新生成）
+backtest_cache*.pkl
+# 旧交易记录
+trades_local*.csv
+trades_daily*.csv
+trades_weekly*.csv
+trades_50wl.csv
+trades_new.csv
+signals*.csv
+verify_result*.csv
+# 其他
 .DS_Store
 .vscode/
 .idea/

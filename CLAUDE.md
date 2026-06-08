@@ -35,6 +35,9 @@ python run_backtest_local.py
 python run_backtest_local_daily.py
 
 # === 辅助工具 ===
+# 绘制单位净值曲线
+python plot_equity.py
+
 # 白名单管理
 python main.py whitelist-update --delay 0.05
 python main.py whitelist-add 000001 --name 平安银行
@@ -47,7 +50,7 @@ python main.py whitelist-show
 ### 选股管道（四层）
 
 ```
-① MA趋势过滤(周线MA20>MA60) → ② 上升状态触发(连续N期) → ③ 盘整区间形成 → ④ MACD二次金叉 + KDJ金叉(1周期内) → 买入信号
+① MA趋势过滤(周线MA20>MA60) → ② 上升状态触发(连续N期) → ③ 盘整区间形成 → ④ MACD二次金叉 + KDJ金叉(N周期内) → 买入信号
 ```
 
 **上升状态定义**（三个条件同时满足）：
@@ -60,16 +63,17 @@ python main.py whitelist-show
 - 区间上沿 = 第一个 `high < 前高` 截面的上一截面最高价
 - 区间封闭后，所有最高价/最低价未突破区间时寻找 MACD+KDJ 确认
 
-### 退出管道
+### 退出管道（五级优先级）
 
 ```
-开仓 → 止损检查(low[i] ≤ 止损价) → 能级突破检测(close[i] ≥ range_high + N×R) → 移动止盈(close[i] < 当前能级价) → 时间兜底
+开仓 → ① 止损(low[i]≤止损价) → ② 假突破检测(close突破区间上限后下一根回落) → ③ 能级突破(close≥range_high+N×R) → ④ 移动止盈(close<当前能级价) → ⑤ 时间兜底
 ```
 
 - **R 定义**：R = (区间上限 - 止损价) × `TP_LEVEL_MULTIPLIER`
 - **能级体系**：能级 N = 区间上限 + N×R（N = 1, 2, 3, …）
 - **止损价**：区间生成后的最低价（≥ 区间下限）
-- **优先级**：止损 > 能级突破检测 > 止盈检查 > 时间兜底
+- **假突破检测**（v2.2 新增）：收盘价首次突破区间上限后，下一根 K 线回落区间内（≤range_high）→ 离场。突破确认（连续两根站上区间上方）后不再检测
+- **优先级**：止损 > 假突破检测 > 能级突破 > 移动止盈 > 时间兜底
 
 ## 关键配置参数
 
@@ -77,37 +81,57 @@ python main.py whitelist-show
 |---|---|---|---|
 | `UPTREND_CONSECUTIVE` | 2 | 2 | 连续上升状态期数 |
 | `VOLUME_MA_PERIOD` | 20 | 20 | 成交量均线周期 |
-| `KDJ_GOLDEN_CROSS_WINDOW` | 1 | 1 | KDJ 金叉有效窗口 |
+| `KDJ_GOLDEN_CROSS_WINDOW` | **3** | 3 | KDJ 金叉有效窗口（1~5扫描，3最优） |
 | `TP_LEVEL_MULTIPLIER` | 1.0 | 2.0 | 能级间距倍率 |
 | `MAX_HOLD_WEEKS` / `MAX_HOLD_DAYS` | 52 | 260 | 最大持仓兜底 |
+| `MAX_POSITIONS` | **11** | 11 | 最大同时持仓数（4~20扫描，11最优） |
+| `CAPITAL_DEPLOY_RATIO` | **1.0** | 1.0 | 总仓位部署比例（满仓） |
+| `MAX_SINGLE_STOCK_PCT` | **0.09** | 0.09 | 单票最大仓位占比（9%） |
 | `USE_MA_TREND_FILTER` | True | True | 周线 MA 趋势过滤 |
 | `MA_TREND_FAST` | 20 | 20 | 快线周期 |
 | `MA_TREND_SLOW` | 60 | 60 | 慢线周期 |
 
-## 回测结果（全量 5273 只 A 股）
+## 回测结果（全量 5273 只 A 股，周频）
 
-| 策略 | 总收益 | 年化 | 最大回撤 | 夏普 | 胜率 | 止损率 |
+| 策略 | 总收益 | 年化 | 最大回撤 | 夏普 | 胜率 | 交易数 |
 |---|---|---|---|---|---|---|
-| **周频 + MA过滤** 🏆 | **+328%** | **+9.9%** | **-39%** | **0.40** | **36.6%** | **59.4%** |
-| 周频 无过滤 | +247% | +8.3% | -36% | 0.34 | 33.5% | 59.2% |
-| 日频 + MA过滤 (M=2) | +158% | +6.0% | -54% | 0.28 | 29.1% | 70.9% |
-| 日频 无过滤 (M=2) | -20% | -1.4% | -73% | 0.02 | 25.9% | 74.1% |
+| **v2.5 最终** 🏆 | **+848.8%** | **+15.6%** | **-44.0%** | **0.33** | **35.3%** | **561** |
+| v2.1 基准 (W=1, 5票, 80%仓) | +328% | +9.9% | -39% | 0.40 | 36.6% | — |
 
-**结论**：周线 MA20>MA60 趋势过滤是唯一通过全量验证的正向优化。过滤掉 33% 空头/震荡市股票后，总收益从 +247% → +328%。
+### 退出原因分布（v2.5）
+
+| 退出类型 | 笔数 | 均盈亏 | 胜率 | 说明 |
+|---|---|---|---|---|
+| `take_profit` | 113 | +45.2% | 99.1% | 能级移动止盈 |
+| `breakout_failure` | 68 | +6.9% | 83.8% | 假突破离场 |
+| `max_hold` | 29 | +29.7% | 75.9% | 时间兜底 |
+| `end_of_data` | 10 | +28.0% | 70.0% | 数据结束 |
+| `stop_loss` | 341 | -11.5% | 0% | 止损 |
+
+### 优化历程
+
+| 版本 | 改动 | 总收益 | 年化 |
+|---|---|---|---|
+| v2.1 | 基准（W=1, POS=5, 80%仓位） | +328% | +9.9% |
+| v2.2 | +假突破离场 | +390.8% | +10.8% |
+| v2.3 | KDJ窗口 1→3 | +742.4% | +14.7% |
+| v2.4 | POS=11, 96%+8% | +643.6% | +13.8% |
+| **v2.5** | **满仓100%+单票9%** | **+848.8%** | **+15.6%** |
 
 ## 模块职责
 
 | 文件 | 职责 |
 |---|---|
-| `config.py` | 所有可调参数，含 MA 趋势过滤开关 |
+| `config.py` | 所有可调参数 |
 | `data_fetcher.py` | AKshare 在线数据（腾讯源 `stock_zh_a_hist_tx`，前复权，日转周） |
 | `local_data_fetcher.py` | 本地 Parquet 数据库批量读取 |
 | `indicators.py` | MACD（EMA 递归）、KDJ（SMA 平滑）、ATR（EMA） |
 | `signal_detector.py` | 价格行为区间 + MACD二次金叉 + KDJ金叉确认 |
 | `stock_scanner.py` | 全市场扫描，支持白名单/历史信号 |
-| `backtest.py` | 回测引擎：止损/止盈/固定持仓 |
+| `backtest.py` | 回测引擎：止损 / 假突破检测 / 能级止盈 / 时间兜底 |
 | `whitelist_manager.py` | 白名单管理 |
 | `main.py` | CLI 入口 |
+| `plot_equity.py` | 单位净值曲线绘图工具 |
 
 ## 目录结构
 
@@ -119,14 +143,16 @@ stock choose/
 ├── indicators.py                # MACD / KDJ / ATR 指标
 ├── signal_detector.py           # 选股信号核心
 ├── stock_scanner.py             # 全市场扫描
-├── backtest.py                  # 回测引擎
-├── whitelist_manager.py         # 白名单
+├── backtest.py                  # 回测引擎（含退出管道）
+├── whitelist_manager.py         # 白名单管理
 ├── main.py                      # CLI 入口
+├── plot_equity.py               # 净值曲线绘图
 ├── run_backtest_full.py         # 全量周频回测（主要）
 ├── run_backtest_full_daily.py   # 全量日频回测
 ├── run_backtest_local.py        # 周频抽样回测
 ├── run_backtest_local_daily.py  # 日频抽样回测
 ├── rule.txt                     # 策略规则定义
+├── requirements.txt             # Python 依赖
 └── CLAUDE.md                    # 本文档
 ```
 
@@ -134,7 +160,8 @@ stock choose/
 
 - **KDJ 公式**：标准 SMA（权重 = 1/N），与通达信一致。切勿用 EMA（权重 = 2/(N+1)）
 - **信号日期一致性**：`signal_date` 取 `dates[i]`（所有条件满足的当前 bar）
-- **止损卖出不计滑点**，止盈/兜底/数据结束卖出计滑点
-- 每笔交易 = `INITIAL_CAPITAL × 0.8 / MAX_POSITIONS`，整手买入
-- MA 趋势过滤在前：先筛掉周线空头股票，再做信号检测，减少 35% 噪音信号
-- 所有指标/区间/信号/止损/止盈检测均仅使用截至当前 bar 的数据，无未来函数
+- **止损卖出不计滑点**，止盈/假突破/兜底/数据结束卖出计滑点
+- **仓位公式**：`per_trade_capital = min(capital × CAPITAL_DEPLOY_RATIO / MAX_POSITIONS, capital × MAX_SINGLE_STOCK_PCT)`，整手买入
+- **MA 趋势过滤在前**：先筛掉周线空头股票，再做信号检测，过滤约 33% 空头/震荡市股票
+- **所有指标/区间/信号/止损/止盈检测均仅使用截至当前 bar 的数据**，无未来函数
+- **假突破检测**（rule.txt 第21行）：收盘价突破区间上限后，下一根 K 线收盘价回落区间内 → 离场。突破确认后不再检测，交由能级体系接管

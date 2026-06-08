@@ -14,6 +14,8 @@ from config import (
     SLIPPAGE,
     HOLD_WEEKS,
     MAX_POSITIONS,
+    CAPITAL_DEPLOY_RATIO,
+    MAX_SINGLE_STOCK_PCT,
     USE_STOP_LOSS,
     USE_TAKE_PROFIT,
     TP_LEVEL_MULTIPLIER,
@@ -35,7 +37,7 @@ class Trade:
     pnl: float          # 盈亏金额
     pnl_pct: float      # 盈亏百分比
     hold_weeks: int
-    exit_reason: str = ""  # "stop_loss" | "max_hold" | "end_of_data" | "fixed_hold"
+    exit_reason: str = ""  # "stop_loss" | "breakout_failure" | "max_hold" | "end_of_data" | "fixed_hold" | "take_profit"
 
 
 @dataclass
@@ -86,7 +88,14 @@ def _find_stop_loss_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
 
 def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
                          range_high: float, max_hold_weeks: int = MAX_HOLD_WEEKS):
-    """止损 + 移动止盈 + 时间兜底的组合退出逻辑。
+    """止损 + 假突破检测 + 移动止盈 + 时间兜底的组合退出逻辑。
+
+    退出优先级（从高到低）：
+        1. 止损 — 最低价触及止损价
+        2. 假突破检测 — 收盘价首次突破区间上限后，下一根回落区间内（≤range_high）离场
+        3. 能级突破 — 收盘价逐级突破 range_high + N*R，抬升止盈价
+        4. 移动止盈 — 收盘价回落跌破当前能级止盈价
+        5. 时间兜底 — 超过最大持仓周期
 
     止盈逻辑（基于能级突破的移动止盈）：
         - R = (range_high - stop_loss) * TP_LEVEL_MULTIPLIER
@@ -109,13 +118,29 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
 
     current_tp_stop = None   # 当前移动止盈价（已突破的最高能级价格）
     highest_level = 0        # 已突破的最高能级编号
+    broke_above_range = False       # 是否已检测到突破区间上限
+    breakout_checked = False        # 是否已完成假突破检测
 
     for i in range(buy_idx + 1, n):
         # --- 1. 止损检查（优先级最高） ---
         if low[i] <= stop_loss:
             return (i, stop_loss, "stop_loss")
 
-        # --- 2. 检查是否突破新的能级 ---
+        # --- 2. 假突破检测：收盘价突破区间上限后，下一根回落区间内离场 ---
+        if not breakout_checked and not broke_above_range and close[i] > range_high:
+            broke_above_range = True
+        elif broke_above_range and not breakout_checked:
+            # 突破后的第一根 bar — 验证是否为假突破
+            if close[i] <= range_high:
+                # 假突破：回落区间内，离场
+                sell_price = float(close[i]) * (1 - SLIPPAGE)
+                return (i, sell_price, "breakout_failure")
+            else:
+                # 突破确认（连续两根站在区间上方），不再检测假突破
+                breakout_checked = True
+                broke_above_range = False
+
+        # --- 3. 检查是否突破新的能级 ---
         # 从当前最高能级+1 开始逐级检查
         N = highest_level + 1
         while True:
@@ -127,13 +152,13 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
             else:
                 break
 
-        # --- 3. 移动止盈检查 ---
+        # --- 4. 移动止盈检查 ---
         if current_tp_stop is not None and close[i] < current_tp_stop:
             # 收盘价回落跌破当前止盈价，触发止盈
             sell_price = float(close[i]) * (1 - SLIPPAGE)
             return (i, sell_price, "take_profit")
 
-        # --- 4. 时间兜底 ---
+        # --- 5. 时间兜底 ---
         if i - buy_idx >= max_hold_weeks:
             sell_price = float(close[i]) * (1 - SLIPPAGE)
             return (i, sell_price, "max_hold")
@@ -238,7 +263,7 @@ def run_backtest(
             continue
 
         # 简化：每笔交易使用总资金的一定比例
-        per_trade_capital = capital * 0.8 / MAX_POSITIONS
+        per_trade_capital = min(capital * CAPITAL_DEPLOY_RATIO / MAX_POSITIONS, capital * MAX_SINGLE_STOCK_PCT)
         shares = int(per_trade_capital / buy_price / 100) * 100  # 整手
 
         if shares <= 0:
@@ -436,7 +461,7 @@ def run_backtest_with_cache(
         if len(positions) >= MAX_POSITIONS:
             continue
 
-        per_trade_capital = capital * 0.8 / MAX_POSITIONS
+        per_trade_capital = min(capital * CAPITAL_DEPLOY_RATIO / MAX_POSITIONS, capital * MAX_SINGLE_STOCK_PCT)
         shares = int(per_trade_capital / buy_price / 100) * 100
 
         if shares <= 0:

@@ -37,7 +37,7 @@ class Trade:
     pnl: float          # 盈亏金额
     pnl_pct: float      # 盈亏百分比
     hold_weeks: int
-    exit_reason: str = ""  # "stop_loss" | "breakout_failure" | "max_hold" | "end_of_data" | "fixed_hold" | "take_profit"
+    exit_reason: str = ""  # "stop_loss" | "approaching_failed" | "breakout_failure" | "max_hold" | "end_of_data" | "fixed_hold" | "take_profit"
 
 
 @dataclass
@@ -87,15 +87,17 @@ def _find_stop_loss_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
 
 
 def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
-                         range_high: float, max_hold_weeks: int = MAX_HOLD_WEEKS):
-    """止损 + 假突破检测 + 移动止盈 + 时间兜底的组合退出逻辑。
+                         range_high: float, max_hold_weeks: int = MAX_HOLD_WEEKS,
+                         signal_type: str = ""):
+    """止损 + approaching验证 + 假突破检测 + 移动止盈 + 时间兜底的组合退出逻辑。
 
     退出优先级（从高到低）：
         1. 止损 — 最低价触及止损价
-        2. 假突破检测 — 收盘价首次突破区间上限后，下一根回落区间内（≤range_high）离场
-        3. 能级突破 — 收盘价逐级突破 range_high + N*R，抬升止盈价
-        4. 移动止盈 — 收盘价回落跌破当前能级止盈价
-        5. 时间兜底 — 超过最大持仓周期
+        2. approaching验证 — 开仓信号为"即将二次金叉"时，3周期内未金叉→离场
+        3. 假突破检测 — 收盘价首次突破区间上限后，下一根回落区间内（≤range_high）离场
+        4. 能级突破 — 收盘价逐级突破 range_high + N*R，抬升止盈价
+        5. 移动止盈 — 收盘价回落跌破当前能级止盈价
+        6. 时间兜底 — 超过最大持仓周期
 
     止盈逻辑（基于能级突破的移动止盈）：
         - R = (range_high - stop_loss) * TP_LEVEL_MULTIPLIER
@@ -110,6 +112,13 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
     n = len(df)
     low = df["low"].values
     close = df["close"].values
+
+    # approaching 信号专用：开仓后需验证 MACD 是否真的金叉
+    is_approaching = (signal_type == "approaching")
+    approaching_verified = not is_approaching  # 非 approaching 信号跳过验证
+    if is_approaching:
+        dif = df["dif"].values
+        dea = df["dea"].values
 
     R = (range_high - stop_loss) * TP_LEVEL_MULTIPLIER
     if R <= 0:
@@ -126,7 +135,17 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
         if low[i] <= stop_loss:
             return (i, stop_loss, "stop_loss")
 
-        # --- 2. 假突破检测：收盘价突破区间上限后，下一根回落区间内离场 ---
+        # --- 2. approaching 验证：3周期内检测 MACD 是否金叉 ---
+        if not approaching_verified:
+            # 检查截至当前 bar 是否已形成金叉
+            if dif[i] > dea[i] and dif[i - 1] <= dea[i - 1]:
+                approaching_verified = True
+            elif i - buy_idx >= 3:
+                # 3个完整周期后仍未金叉 → 信号无效，平仓退出
+                sell_price = float(close[i]) * (1 - SLIPPAGE)
+                return (i, sell_price, "approaching_failed")
+
+        # --- 3. 假突破检测：收盘价突破区间上限后，下一根回落区间内离场 ---
         if not breakout_checked and not broke_above_range and close[i] > range_high:
             broke_above_range = True
         elif broke_above_range and not breakout_checked:
@@ -140,7 +159,7 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
                 breakout_checked = True
                 broke_above_range = False
 
-        # --- 3. 检查是否突破新的能级 ---
+        # --- 4. 检查是否突破新的能级 ---
         # 从当前最高能级+1 开始逐级检查
         N = highest_level + 1
         while True:
@@ -152,13 +171,13 @@ def _find_combined_exit(df: pd.DataFrame, buy_idx: int, stop_loss: float,
             else:
                 break
 
-        # --- 4. 移动止盈检查 ---
+        # --- 5. 移动止盈检查 ---
         if current_tp_stop is not None and close[i] < current_tp_stop:
             # 收盘价回落跌破当前止盈价，触发止盈
             sell_price = float(close[i]) * (1 - SLIPPAGE)
             return (i, sell_price, "take_profit")
 
-        # --- 5. 时间兜底 ---
+        # --- 6. 时间兜底 ---
         if i - buy_idx >= max_hold_weeks:
             sell_price = float(close[i]) * (1 - SLIPPAGE)
             return (i, sell_price, "max_hold")
@@ -243,7 +262,7 @@ def run_backtest(
             # --- 止损退出模式（可选止盈联动） ---
             if USE_TAKE_PROFIT:
                 sell_idx, sell_price, exit_reason = _find_combined_exit(
-                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks
+                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks, sig.signal_type
                 )
             else:
                 sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
@@ -442,7 +461,7 @@ def run_backtest_with_cache(
             # --- 止损退出模式（可选止盈联动） ---
             if USE_TAKE_PROFIT:
                 sell_idx, sell_price, exit_reason = _find_combined_exit(
-                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks
+                    df, buy_idx, effective_stop, sig.range_high, max_hold_weeks, sig.signal_type
                 )
             else:
                 sell_idx, sell_price, exit_reason = _find_stop_loss_exit(
